@@ -12,7 +12,7 @@ st.caption("Select any date — past or present — to run the momentum strategy
 with st.sidebar:
     st.header("⚙️ Settings")
     analysis_date = st.date_input("Analysis Date", value=date.today(), max_value=date.today())
-    lookback_months = st.slider("Lookback Period (months)", min_value=1, max_value=60, value=12)
+    lookback_months = st.selectbox("Lookback Period (months)", options=[1, 3, 6, 12, 24], index=3)
     custom_tickers_input = st.text_input("Add Custom Tickers (comma-separated)", placeholder="e.g., AAPL, MSFT, QQQ")
     run = st.button("🚀 Run Analysis", type="primary", use_container_width=True)
     st.markdown("---")
