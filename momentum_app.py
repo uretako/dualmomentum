@@ -148,10 +148,15 @@ if run:
         ret_3m = calc_return(monthly, 3)
         risk = calc_risk_metrics(monthly, lookback_months)
 
+        bil_mom = mom.get(CASH, 0.0)
+        if pd.isna(bil_mom):
+            bil_mom = 0.0
+
         results = pd.DataFrame({
             "1M Return %": ret_1m,
             "3M Return %": ret_3m,
             f"{lookback_months}M Momentum %": mom,
+            "Beats Cash?": mom.apply(lambda x: "✅ Yes" if pd.notna(x) and x > bil_mom else "❌ No"),
         }).join(risk).sort_values(f"{lookback_months}M Momentum %", ascending=False)
 
         investable = [c for c in monthly.columns if c != CASH]
@@ -159,12 +164,24 @@ if run:
         best = mom_investable.idxmax()
         best_mom = mom_investable.max()
 
-        if pd.notna(best_mom) and best_mom > 0:
+        # Antonacci Dual Momentum — two rules:
+        # 1. RELATIVE: pick asset with highest lookback return among investable assets
+        # 2. ABSOLUTE: that asset must also beat BIL (cash) over same lookback
+        #    If it fails absolute test, go to cash regardless of relative ranking
+        passes_relative = pd.notna(best_mom)
+        passes_absolute = passes_relative and (best_mom > bil_mom)
+
+        if passes_absolute:
             recommendation = best
-            reason = f"highest positive momentum: +{best_mom:.2f}%"
+            reason = (f"highest relative momentum (+{best_mom:.2f}%) "
+                      f"and beats cash (BIL: {bil_mom:.2f}%) — Antonacci dual momentum signal")
+        elif passes_relative and not passes_absolute:
+            recommendation = CASH
+            reason = (f"{best} had highest momentum (+{best_mom:.2f}%) "
+                      f"but failed absolute test — does not beat cash (BIL: {bil_mom:.2f}%)")
         else:
             recommendation = CASH
-            reason = "no assets show positive momentum — safety position"
+            reason = "no assets have sufficient data for momentum calculation"
 
         c1, c2, c3 = st.columns(3)
         c1.metric("📅 Analysis Date", str(analysis_date))
