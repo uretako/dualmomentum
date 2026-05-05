@@ -32,16 +32,13 @@ with st.sidebar:
 
 
 def download_close(sym, start, end):
-    """Robustly download Close prices for any yfinance version."""
     try:
         raw = yf.download(sym, start=start, end=end, auto_adjust=True, progress=False)
         if raw is None or raw.empty:
             return None
         close = raw["Close"]
-        # yfinance 1.x with multi-ticker returns MultiIndex — flatten
         if isinstance(close, pd.DataFrame):
             close = close.iloc[:, 0]
-        # Force to plain Series with DatetimeIndex
         s = pd.Series(close.values.flatten(), index=pd.to_datetime(raw.index), name=sym)
         s = s.dropna()
         return s if len(s) > 0 else None
@@ -68,19 +65,16 @@ def get_monthly_prices(symbols, analysis_date, lookback_months):
 
     if failed:
         st.warning(f"Could not download: {', '.join(failed)}")
-
     if len(series_list) < 2:
         st.error("Not enough assets downloaded successfully.")
         return None
 
-    # Safe concat — aligns on date index automatically
-    prices = pd.concat(series_list, axis=1)
+    prices = pd.concat(series_list, axis=1, sort=True)
     prices = prices[prices.index <= pd.Timestamp(analysis_date)]
     prices = prices.ffill()
 
     monthly = prices.resample("ME").last()
-    min_rows = lookback_months + 4
-    monthly = monthly.dropna(thresh=min_rows, axis=1)
+    monthly = monthly.dropna(thresh=lookback_months + 4, axis=1)
 
     if len(monthly) < lookback_months + 1:
         st.error("Not enough historical data for selected lookback.")
@@ -92,9 +86,7 @@ def get_monthly_prices(symbols, analysis_date, lookback_months):
 def calc_return(monthly, months_back):
     if len(monthly) < months_back + 1:
         return pd.Series(np.nan, index=monthly.columns)
-    recent = monthly.iloc[-1]
-    base = monthly.iloc[-(months_back + 1)]
-    return ((recent / base) - 1) * 100
+    return ((monthly.iloc[-1] / monthly.iloc[-(months_back + 1)]) - 1) * 100
 
 
 def calc_risk_metrics(monthly, lookback_months):
@@ -111,10 +103,10 @@ def calc_risk_metrics(monthly, lookback_months):
             max_dd = ((cum - cum.cummax()) / cum.cummax()).min() * 100
             worst = r.min() * 100
             metrics[col] = {
-                "Volatility %": round(vol, 2),
-                "Max Drawdown %": round(max_dd, 2),
-                "Sharpe Ratio": round(sharpe, 2),
-                "Worst Month %": round(worst, 2)
+                "Volatility": round(vol, 2),
+                "Max Drawdown": round(max_dd, 2),
+                "Sharpe": round(sharpe, 2),
+                "Worst Month": round(worst, 2)
             }
     return pd.DataFrame(metrics).T
 
@@ -143,52 +135,52 @@ if run:
     monthly = get_monthly_prices(all_symbols, analysis_date, lookback_months)
 
     if monthly is not None:
-        mom = calc_return(monthly, lookback_months)
-        ret_1m = calc_return(monthly, 1)
-        ret_3m = calc_return(monthly, 3)
-        risk = calc_risk_metrics(monthly, lookback_months)
+        mom   = calc_return(monthly, lookback_months)
+        ret1m = calc_return(monthly, 1)
+        ret3m = calc_return(monthly, 3)
+        risk  = calc_risk_metrics(monthly, lookback_months)
 
-        bil_mom = mom.get(CASH, 0.0)
-        if pd.isna(bil_mom):
-            bil_mom = 0.0
-
-        results = pd.DataFrame({
-            "1M Return %": ret_1m,
-            "3M Return %": ret_3m,
-            f"{lookback_months}M Momentum %": mom,
-            "Beats Cash?": mom.apply(lambda x: "✅ Yes" if pd.notna(x) and x > bil_mom else "❌ No"),
-        }).join(risk).sort_values(f"{lookback_months}M Momentum %", ascending=False)
-
+        # Antonacci Dual Momentum
+        bil_mom = float(mom.get(CASH, 0.0)) if pd.notna(mom.get(CASH, np.nan)) else 0.0
         investable = [c for c in monthly.columns if c != CASH]
         mom_investable = mom[investable]
         best = mom_investable.idxmax()
         best_mom = mom_investable.max()
 
-        # Antonacci Dual Momentum — two rules:
-        # 1. RELATIVE: pick asset with highest lookback return among investable assets
-        # 2. ABSOLUTE: that asset must also beat BIL (cash) over same lookback
-        #    If it fails absolute test, go to cash regardless of relative ranking
         passes_relative = pd.notna(best_mom)
         passes_absolute = passes_relative and (best_mom > bil_mom)
 
         if passes_absolute:
             recommendation = best
             reason = (f"highest relative momentum (+{best_mom:.2f}%) "
-                      f"and beats cash (BIL: {bil_mom:.2f}%) — Antonacci dual momentum signal")
+                      f"and beats cash BIL ({bil_mom:.2f}%) ✅")
         elif passes_relative and not passes_absolute:
             recommendation = CASH
             reason = (f"{best} had highest momentum (+{best_mom:.2f}%) "
-                      f"but failed absolute test — does not beat cash (BIL: {bil_mom:.2f}%)")
+                      f"but does not beat cash BIL ({bil_mom:.2f}%) — absolute test failed ❌")
         else:
             recommendation = CASH
-            reason = "no assets have sufficient data for momentum calculation"
+            reason = "no assets have sufficient momentum data"
 
+        # Build results table — numeric columns only, no mixed types
+        numeric_cols = pd.DataFrame({
+            "1M Ret %":   ret1m,
+            "3M Ret %":   ret3m,
+            f"{lookback_months}M Mom %": mom,
+        })
+        results = numeric_cols.join(risk).sort_values(f"{lookback_months}M Mom %", ascending=False)
+
+        # Beats cash as separate display column (kept out of styled numeric table)
+        beats_cash = mom.apply(lambda x: "✅" if pd.notna(x) and x > bil_mom else "❌")
+
+        # Metrics row
         c1, c2, c3 = st.columns(3)
         c1.metric("📅 Analysis Date", str(analysis_date))
-        c2.metric("🏆 Recommended Asset", recommendation)
-        c3.metric("📊 Momentum", f"{best_mom:.2f}%" if pd.notna(best_mom) else "N/A")
-        st.info(f"**Strategy says:** Invest in **{recommendation}** — {reason}")
+        c2.metric("🏆 Recommendation", recommendation)
+        c3.metric(f"📊 {lookback_months}M Momentum", f"{best_mom:.2f}%" if pd.notna(best_mom) else "N/A")
+        st.info(f"**Antonacci Dual Momentum:** Invest in **{recommendation}** — {reason}")
 
+        # Forward returns for past dates
         if is_past:
             st.markdown("---")
             st.subheader("⏩ Forward Returns from Analysis Date")
@@ -205,47 +197,59 @@ if run:
         with tab1:
             st.subheader("Performance & Risk Matrix")
 
+            # Add beats cash column for display only
+            display_df = results.copy()
+            display_df.insert(0, "Beats Cash?", beats_cash)
+
+            # Style only numeric columns
+            numeric_subset = [c for c in display_df.columns if c != "Beats Cash?"]
+
             def color_val(val):
-                if pd.isna(val): return ""
-                return "color: green; font-weight: bold" if val > 0 else "color: red; font-weight: bold"
+                if not isinstance(val, (int, float)) or pd.isna(val):
+                    return ""
+                return "color: green; font-weight: bold" if val > 0 else "color: red"
 
             def color_dd(val):
-                if pd.isna(val): return ""
+                if not isinstance(val, (int, float)) or pd.isna(val):
+                    return ""
                 if val < -20: return "background-color: #FF6B6B"
                 if val < -10: return "background-color: #FFD700"
                 return "background-color: #90EE90"
 
-            styled = (results.style
-                      .map(color_val, subset=[f"{lookback_months}M Momentum %", "1M Return %", "3M Return %"])
-                      .map(color_dd, subset=["Max Drawdown %"])
-                      .format("{:.2f}", na_rep="N/A"))
+            mom_col = f"{lookback_months}M Mom %"
+            styled = (display_df.style
+                      .map(color_val, subset=["1M Ret %", "3M Ret %", mom_col])
+                      .map(color_dd, subset=["Max Drawdown"])
+                      .format("{:.2f}", subset=numeric_subset, na_rep="N/A"))
             st.dataframe(styled, use_container_width=True)
 
-            mom_df = results[[f"{lookback_months}M Momentum %"]].reset_index()
-            mom_df.columns = ["Asset", "Momentum %"]
+            # Momentum bar chart
+            mom_df = pd.DataFrame({"Asset": mom.index, "Momentum %": mom.values})
             mom_df["Color"] = mom_df["Momentum %"].apply(lambda x: "Positive" if x > 0 else "Negative")
             fig = px.bar(mom_df, x="Asset", y="Momentum %", color="Color",
                          color_discrete_map={"Positive": "#90EE90", "Negative": "#FF6B6B"},
-                         title=f"{lookback_months}-Month Momentum by Asset")
+                         title=f"{lookback_months}-Month Momentum — dashed line = BIL (cash hurdle)")
+            fig.add_hline(y=bil_mom, line_dash="dash", line_color="orange",
+                          annotation_text=f"BIL hurdle: {bil_mom:.2f}%")
             fig.update_layout(showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
 
         with tab2:
             ca, cb = st.columns(2)
             with ca:
-                vol_df = results[["Volatility %"]].reset_index()
+                vol_df = results[["Volatility"]].reset_index()
                 vol_df.columns = ["Asset", "Volatility %"]
                 st.plotly_chart(px.bar(vol_df, x="Asset", y="Volatility %",
                                        color="Volatility %", color_continuous_scale="Reds",
                                        title="Annualized Volatility"), use_container_width=True)
             with cb:
-                dd_df = results[["Max Drawdown %"]].reset_index()
+                dd_df = results[["Max Drawdown"]].reset_index()
                 dd_df.columns = ["Asset", "Max Drawdown %"]
                 st.plotly_chart(px.bar(dd_df, x="Asset", y="Max Drawdown %",
                                        color="Max Drawdown %", color_continuous_scale="Blues_r",
                                        title="Maximum Drawdown"), use_container_width=True)
 
-            scatter_df = results[[f"{lookback_months}M Momentum %", "Volatility %"]].reset_index().dropna()
+            scatter_df = results[[mom_col, "Volatility"]].reset_index().dropna()
             scatter_df.columns = ["Asset", "Momentum %", "Volatility %"]
             fig4 = px.scatter(scatter_df, x="Volatility %", y="Momentum %",
                               text="Asset", color="Asset",
